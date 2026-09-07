@@ -14,16 +14,10 @@ venv/
 data/raw/
 *.wav
 
-# (Optional) If you want to keep your split text files out of the repo too
+
 data/splits/
 *.text
-# =========================
-# Machine Learning Models
-# =========================
-# Ignore saved weights and exported models
-models/saved/
-*.pth
-*.onnx
+
 
 # =========================
 # OS & IDE Files
