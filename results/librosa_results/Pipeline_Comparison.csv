@@ -1,0 +1,6 @@
+Metric,Training Pipeline (PyTorch),Deployed Pipeline (librosa+ONNX)
+Accuracy,0.757778,0.864444
+Macro Precision,0.772651,0.863842
+Macro Recall,0.757778,0.864444
+Macro F1-Score,0.754260,0.863610
+MCC,0.646516,0.797155

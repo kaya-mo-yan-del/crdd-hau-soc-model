@@ -1,0 +1,27 @@
+# Lives in docker/, one level below the project root.
+# Usage (run from anywhere, paths below resolve relative to this file):
+#   docker compose -f docker/docker-compose.yml build
+#   docker compose -f docker/docker-compose.yml run --rm crdd python scripts/02_train.py
+name: crdd-train
+
+services:
+  crdd:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: crdd-train:1.0
+    working_dir: /app
+    volumes:
+      - ../data:/app/data
+      - ../models:/app/models
+      - ../results:/app/results
+    # DataLoader workers share memory through /dev/shm; the 64 MB default causes
+    # "bus error" crashes when NUM_WORKERS > 0.
+    shm_size: "2gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

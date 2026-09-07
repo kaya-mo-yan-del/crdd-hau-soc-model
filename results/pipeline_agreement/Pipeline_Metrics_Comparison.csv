@@ -1,0 +1,6 @@
+Metric,Training Pipeline (PyTorch + torchaudio),Deployed Pipeline (ONNX + librosa),Difference
+Accuracy,0.863333,0.864444,1.11e-03
+Macro Precision,0.863295,0.863842,5.47e-04
+Macro Recall,0.863333,0.864444,1.11e-03
+Macro F1,0.862040,0.863610,1.57e-03
+MCC,0.796146,0.797155,1.01e-03

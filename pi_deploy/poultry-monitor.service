@@ -1,0 +1,17 @@
+[Unit]
+Description=PoultryMonitor - chicken respiratory distress detector
+After=sound.target network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/pi_deploy
+ExecStart=/usr/bin/python3 /home/pi/pi_deploy/pi_monitor.py
+Restart=always
+RestartSec=5
+# Log everything (the terminal output) to the system journal:
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

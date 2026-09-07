@@ -1,0 +1,15 @@
+Metric,A_PyTorch_torchaudio,B_ONNX_torchaudio,C_ONNX_librosa_Pi,Difference_C_minus_A
+Accuracy,0.863333,0.863333,0.864444,1.11e-03
+Macro Precision,0.863295,0.863295,0.863842,5.47e-04
+Macro Recall,0.863333,0.863333,0.864444,1.11e-03
+Macro F1,0.862040,0.862040,0.863610,1.57e-03
+MCC,0.796146,0.796146,0.797155,1.01e-03
+
+Total test clips,900,,,
+Disagreements A vs B,0,,,
+Disagreements B vs C,20,,,
+Disagreements A vs C,20,,,
+Max logit diff A vs B,1.13e-04,,,
+Max logit diff B vs C,4.82e+00,,,
+Max input diff B vs C,4.2630,,,
+Mean input diff B vs C,2.3406,,,

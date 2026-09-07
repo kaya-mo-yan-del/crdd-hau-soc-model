@@ -1,0 +1,29 @@
+# Datasets, checkpoints and outputs are mounted at runtime, never copied into the image.
+data/
+models/
+results/
+pi_deploy/recordings/
+recordings/
+
+# Model artifacts
+*.pth
+*.onnx
+*.wav
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Tooling
+.git/
+.gitignore
+.vscode/
+.idea/
+*.ipynb_checkpoints/
+
+# Docs
+DOCKER.md
+README.md

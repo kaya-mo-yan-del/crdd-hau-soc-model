@@ -1,0 +1,10 @@
+# Requirements for the Raspberry Pi 4B
+numpy
+librosa          # mel spectrogram (matched to torchaudio settings)
+soundfile        # writing .wav recordings
+sounddevice      # USB microphone capture (needs libportaudio2)
+onnxruntime      # runs crdd_model_v1.onnx on the ARM CPU
+pillow           # bilinear resize to 224x224
+RPLCD            # 16x2 character LCD over I2C (PCF8574 backpack)
+smbus2           # I2C backend used by RPLCD
+supabase

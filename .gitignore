@@ -1,0 +1,34 @@
+# =========================
+# Python & Environment
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# =========================
+# Datasets & Media
+# =========================
+# Ignore all the heavy audio files
+data/raw/
+*.wav
+
+# (Optional) If you want to keep your split text files out of the repo too
+data/splits/
+*.text
+# =========================
+# Machine Learning Models
+# =========================
+# Ignore saved weights and exported models
+models/saved/
+*.pth
+*.onnx
+
+# =========================
+# OS & IDE Files
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

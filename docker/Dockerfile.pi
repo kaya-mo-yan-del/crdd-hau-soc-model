@@ -1,0 +1,29 @@
+# CRDD live monitoring image for the Raspberry Pi 4B (arm64).
+# ONNX Runtime only. PyTorch is deliberately absent.
+#
+# Build on the Pi itself:
+#   docker build -f Dockerfile.pi -t crdd-pi:1.0 .
+
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    TZ=Asia/Manila
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsndfile1 \
+        libportaudio2 \
+        libgomp1 \
+        i2c-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pi_deploy/pi_requirements.txt .
+RUN pip install --no-cache-dir -r pi_requirements.txt
+
+COPY pi_deploy/ ./
+
+# recordings/ is mounted so saved clips survive container rebuilds.
+CMD ["python", "pi_monitor.py"]

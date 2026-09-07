@@ -1,0 +1,8 @@
+Metric,PyTorch,ONNX,Difference
+Accuracy,0.863333,0.863333,0.00e+00
+Macro Precision,0.863295,0.863295,0.00e+00
+Macro Recall,0.863333,0.863333,0.00e+00
+Macro F1,0.862040,0.862040,0.00e+00
+MCC,0.796146,0.796146,0.00e+00
+Prediction Disagreements,0/900,,
+Max Logit Difference,1.18e-04,,

@@ -1,0 +1,28 @@
+# Core PyTorch (GPU Enabled)
+torch
+torchvision
+torchaudio
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# Audio Processing
+soundfile
+librosa
+
+# Model & Training Utilities
+timm>=1.0.0          # mobilenetv4_conv_small.e1200_r224_in1k requires this or newer
+numpy
+scikit-learn
+pillow
+tqdm
+matplotlib
+seaborn
+
+# Export & Deployment
+onnx
+onnxruntime
+
+# Deployed-Pipeline Evaluation
+# 05_evaluate_pi_pipeline.py imports pi_deploy/pi_monitor.py, which needs these
+# at import time even though they're PC-side eval, not Pi runtime.
+sounddevice
+supabase
