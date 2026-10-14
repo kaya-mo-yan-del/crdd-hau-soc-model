@@ -1,13 +1,38 @@
 # Chicken Respiratory Distress Detector (CRDD)
 
-An audio classification system that detects respiratory distress in chickens from their
-vocalizations. The model is trained on a PC with PyTorch and deployed to a Raspberry Pi 4B
-through ONNX Runtime, where it runs continuously as a background service, displays results
-on an LCD, and syncs detections to a Supabase dashboard.
+**Live dashboard: [crdd-hau-soc.vercel.app](https://crdd-hau-soc.vercel.app/)**
+**Docker image: [`docker.io/k1mchir1ce/crdd-train`](https://hub.docker.com/r/k1mchir1ce/crdd-train)** · [Docker setup guide](docker/DOCKER.md)
 
-## Overview
+CRDD is an edge AI system that listens to chickens and detects signs of respiratory
+distress from their vocalizations. A Raspberry Pi 4B with a USB microphone records audio
+in 5-second windows, classifies each window on-device, shows the result on an LCD, and
+sends respiratory distress detections to a web dashboard so farm staff can monitor the flock remotely.
 
-The system listens to 5-second windows of audio and classifies each one into three classes:
+## Dashboard
+
+[**crdd-hau-soc.vercel.app**](https://crdd-hau-soc.vercel.app/) is the web dashboard for
+the deployed device. It shows the respiratory distress detections uploaded by the
+Pi, with confidence score, detection time, and the recorded audio clip, plus whether the
+Pi is currently online (based on a heartbeat the device sends every cycle).
+
+Detections arrive in real time through Supabase (Postgres + Storage + Realtime). The Pi
+writes to Supabase directly, and the dashboard reads from it.
+
+## How the System Works
+
+```
+ USB mic ──> Raspberry Pi 4B ──────────────────────────────> 16x2 LCD
+             record 5 s → log-mel spectrogram → ONNX model     (label + confidence)
+                     │
+                     │  Sick detections ≥ 70% confidence
+                     v
+             Supabase (clip storage + detections table + heartbeat)
+                     │
+                     v
+             Web dashboard (crdd-hau-soc.vercel.app)
+```
+
+Each 5-second window is classified into one of three classes
 
 | Label | Display Name | Meaning |
 |---|---|---|
@@ -15,61 +40,92 @@ The system listens to 5-second windows of audio and classifies each one into thr
 | `Sick` | Respiratory Distress | Vocalization showing signs of respiratory illness |
 | `None` | Background Noise | No relevant chicken vocalization |
 
-Audio is converted into a 128-band log-mel spectrogram, resized to 224x224, and passed to a
-MobileNetV4 (conv-small) classifier fine-tuned from ImageNet weights. On the Pi, detections
-at or above a 70% confidence threshold are saved locally, and `Sick` detections are uploaded
-to Supabase for the web dashboard.
+On the Pi, any detection at or above 70% confidence is saved to the SD card. Only `Sick`
+clips are uploaded to Supabase. Both local and cloud storage clean themselves up when
+space runs low, deleting the lowest-confidence clips first.
 
-The repository covers the full lifecycle: dataset splitting, preprocessing, training,
-evaluation, ONNX export, deployed-pipeline validation, and edge deployment.
+## The Model
 
-## System Architecture
+| Property | Value |
+|---|---|
+| Architecture | MobileNetV4 conv-small (`timm`) |
+| Pretrained weights | ImageNet (`mobilenetv4_conv_small.e1200_r224_in1k`) |
+| Input | 5 s of 16 kHz mono audio → 128-band log-mel spectrogram → 3 × 224 × 224 |
+| Output | 3 class logits (Healthy, Sick, None) |
+| Loss | Cross-entropy with inverse-frequency class weights and label smoothing (0.1) |
+| Optimizer | AdamW (lr 3e-4, weight decay 1e-4) with cosine annealing |
+| Regularization | Dropout, gradient clipping, waveform augmentation, SpecAugment |
+| Deployment format | ONNX opset 17, run with ONNX Runtime on the Pi's CPU |
 
+The spectrogram is treated like an image, so an ImageNet-pretrained CNN can be fine-tuned
+on a small audio dataset. MobileNetV4 conv-small was chosen because it is small and fast
+enough for real-time CPU inference on a Raspberry Pi 4B.
+
+Class weights in the loss compensate for `Sick` being the minority class. Augmentation
+(random gain, noise, time shift, time and frequency masking) is applied during training
+only, never during validation or testing.
+
+### Results (held-out test set, 900 clips)
+
+| Metric | Training pipeline (PyTorch + torchaudio) | Deployed pipeline (ONNX + librosa) |
+|---|---|---|
+| Accuracy | 86.33% | 86.44% |
+| Macro Precision | 0.8633 | 0.8638 |
+| Macro Recall | 0.8633 | 0.8644 |
+| Macro F1 | 0.8620 | 0.8636 |
+| MCC | 0.7961 | 0.7972 |
+
+Source `results/pipeline_agreement/Pipeline_Metrics_Comparison.csv`. The two pipelines
+disagree on 20 of 900 clips, and PyTorch vs ONNX on the same input agree on all 900
+(max logit difference 1.13e-4). See [Dual-pipeline design](#dual-pipeline-design).
+
+### Dual-pipeline design
+
+The project keeps two preprocessing implementations on purpose
+
+- **Training pipeline**, PyTorch + torchaudio, used for training and the reported metrics.
+- **Deployment pipeline**, NumPy + librosa, used on the Pi where PyTorch is too heavy.
+
+The Pi only receives the `pi_deploy/` folder, so its audio constants are duplicated in
+`pi_monitor.py`. `pi_deploy/verify_preprocessing.py` checks a single clip through both
+pipelines, and `scripts/05_evaluate_pi_pipeline.py` runs the whole test set through the
+deployed path to measure the gap.
+
+## Quick Start with Docker
+
+The easiest way to reproduce training and evaluation is the prebuilt Docker image. It
+contains the code and all dependencies (CUDA 12.1, PyTorch, timm, ONNX Runtime).
+
+```bash
+docker pull k1mchir1ce/crdd-train@sha256:78c97d6e745b98c36ed720447683c6734d25c43de05a053608f78f8dd4a53ab3
 ```
-Raw audio (.wav)
-    |
-    v
-Dataset splitting            70/15/15 stratified split per class
-    |
-    v
-Preprocessing                mono mixdown, 16 kHz resample, 5-second pad/crop
-    |
-    v
-Feature extraction           128-band log-mel spectrogram, 224x224, 3 channels
-    |
-    v
-Training                     MobileNetV4, class-weighted loss, AdamW + cosine annealing
-    |
-    v
-Evaluation                   accuracy, macro P/R/F1, MCC, confusion matrix, per-epoch curves
-    |
-    v
-ONNX export                  framework-independent graph (opset 17)
-    |
-    v
-Deployed-pipeline evaluation same test set through librosa + ONNX
-    |
-    v
-Raspberry Pi deployment      ONNX Runtime, CPU-only inference, systemd service
-    |
-    v
-Live monitoring              LCD readout, local clip storage, Supabase sync
+
+| | |
+|---|---|
+| Image | [`docker.io/k1mchir1ce/crdd-train`](https://hub.docker.com/r/k1mchir1ce/crdd-train) |
+| Digest | `sha256:78c97d6e745b98c36ed720447683c6734d25c43de05a053608f78f8dd4a53ab3` |
+
+Pulling by digest gets the exact image used for the thesis results, even if `latest` is
+updated later.
+
+**[→ Full Docker instructions (docker/DOCKER.md)](docker/DOCKER.md)** covers GPU setup,
+running each pipeline step with `docker compose`, plain `docker run` on Windows, building
+the Raspberry Pi image, and troubleshooting.
+
+Short version, run from the project root
+
+```bash
+docker compose -f docker/docker-compose.yml run --rm crdd python scripts/01_prepare_data.py
+docker compose -f docker/docker-compose.yml run --rm crdd python scripts/02_train.py
+docker compose -f docker/docker-compose.yml run --rm crdd python scripts/04_evaluation.py
+docker compose -f docker/docker-compose.yml run --rm crdd python scripts/03_export_onnx.py
+docker compose -f docker/docker-compose.yml run --rm crdd python scripts/05_evaluate_pi_pipeline.py
 ```
 
-### Dual-Pipeline Design
+Datasets, checkpoints, and results are mounted from your machine, not baked into the
+image.
 
-The project maintains two preprocessing implementations:
-
-- **Training pipeline** — PyTorch and torchaudio, used for training and reported metrics.
-- **Deployment pipeline** — NumPy and librosa, used on the Pi where PyTorch is too heavy.
-
-The Pi only receives the `pi_deploy/` folder, so its preprocessing constants are duplicated
-intentionally. `05_evaluate_pi_pipeline.py` measures the gap by running the same test set
-through the deployed path and writing a side-by-side comparison table. The two pipelines
-agree on the large majority of clips but are not bit-identical; the resampling stage is the
-known source of the remaining divergence.
-
-## Requirements
+## Manual Setup (without Docker)
 
 ### Training machine
 
@@ -80,107 +136,21 @@ known source of the remaining divergence.
 pip install -r requirements.txt
 ```
 
+`requirements.lock.txt` lists exact pinned versions for full reproducibility.
+
 ### Raspberry Pi 4B
 
-- Raspberry Pi OS (64-bit recommended)
+- Raspberry Pi OS 64-bit
 - USB microphone
-- 16x2 character LCD over I2C with a PCF8574 backpack (optional; the monitor runs without it)
+- 16x2 character LCD over I2C with a PCF8574 backpack (optional, the monitor runs without it)
 - `libportaudio2` system package, required by `sounddevice`
 
 ```bash
 sudo apt install libportaudio2
-pip install -r pi_requirements.txt
+pip install -r pi_deploy/pi_requirements.txt
 ```
 
-PyTorch is deliberately excluded from the Pi requirements. Inference runs entirely through
-ONNX Runtime.
-
-## Directory Structure
-
-```
-chicken-respiratory-distress-detector-v1/
-|
-├── configs/
-│   └── config.py                       Central configuration
-|
-├── src/
-│   ├── data/
-│   │   ├── audio_dataset.py            PyTorch Dataset: wav to spectrogram tensor
-│   │   └── split_dataset.py            Train/val/test split generation
-│   ├── models/
-│   │   └── builder.py                  MobileNetV4 model construction
-│   └── training/
-│       └── trainer.py                  Training and validation loops
-|
-├── scripts/
-│   ├── 01_prepare_data.py              Build data splits
-│   ├── 02_train.py                     Train the model
-│   ├── 03_export_onnx.py               Export to ONNX
-│   ├── 04_evaluation.py                Evaluate the training pipeline
-│   └── 05_evaluate_pi_pipeline.py      Evaluate the deployed pipeline
-|
-├── pi_deploy/
-│   ├── pi_monitor.py                   Live inference on the Raspberry Pi
-│   ├── crdd.service                    systemd unit for continuous operation
-│   ├── pi_requirements.txt             Pi-only dependencies
-│   └── crdd_model_v1.onnx              Copied here before deployment
-|
-├── data/
-│   ├── raw/
-│   │   ├── Healthy/
-│   │   ├── Sick/
-│   │   └── None/
-│   └── splits/                         Generated by 01_prepare_data.py
-│       ├── train.txt
-│       ├── val.txt
-│       └── test.txt
-|
-├── models/
-│   └── saved/
-│       ├── crdd_model_v1.pth           Best checkpoint by validation accuracy
-│       └── crdd_model_v1.onnx          Exported ONNX model
-|
-├── results/                            Metrics, tables, and figures
-│   └── librosa_results/                Deployed-pipeline outputs
-|
-├── requirements.txt
-└── README.md
-```
-
-## File Reference
-
-### Configuration
-
-| File | Description |
-|---|---|
-| `configs/config.py` | Single source of truth for paths, audio parameters (16 kHz, 5 s, 128 mel bins, 224x224), class names, and training hyperparameters. All other modules import from here. |
-
-### Source Modules
-
-| File | Description |
-|---|---|
-| `src/data/split_dataset.py` | Stratified 70/15/15 split per class with a fixed seed. Writes `train.txt`, `val.txt`, and `test.txt` as `path,label` pairs. |
-| `src/data/audio_dataset.py` | `ChickenAudioDataset`. Handles mono mixdown, resampling, fixed-length pad/crop, waveform augmentation (gain, noise, time shift), log-mel conversion, SpecAugment, per-sample standardization, channel replication, and resizing. Augmentation is applied during training only. |
-| `src/models/builder.py` | Builds MobileNetV4 (conv-small) via `timm` with an ImageNet-pretrained backbone, a 3-class head, and dropout. |
-| `src/training/trainer.py` | `train_one_epoch()` and `validate()`. Includes gradient clipping; validation returns raw predictions for metric computation. |
-
-### Scripts
-
-| File | Description |
-|---|---|
-| `01_prepare_data.py` | Entry point for split generation. Scans the raw class folders and writes the three split files. |
-| `02_train.py` | Main training script. Computes inverse-frequency class weights, configures AdamW with cosine annealing, tracks per-epoch metrics, saves the best checkpoint, and applies early stopping. History is written every epoch so an interrupted run is not lost. |
-| `03_export_onnx.py` | Converts the checkpoint to ONNX (opset 17) and verifies that PyTorch and ONNX outputs match within 1e-4 before deployment. |
-| `04_evaluation.py` | Evaluates the trained PyTorch model on the held-out test set. Produces per-epoch tables and curves from `training_history.json`, plus overall metrics, a confusion matrix, a per-class bar chart, and a correct/wrong pie chart. Outputs are prefixed `Model_A_Raw_`. |
-| `05_evaluate_pi_pipeline.py` | Runs the same test set through the librosa preprocessing and ONNX model, producing the equivalent metric set for the deployed path plus a side-by-side comparison table. Outputs are prefixed `Model_A_Pi_`. Runs on the training machine, not the Pi. |
-
-### Deployment
-
-| File | Description |
-|---|---|
-| `pi_deploy/pi_monitor.py` | Continuous monitoring loop on the Pi: record, preprocess, infer, print per-class confidences, update the LCD, save confident detections, and upload `Sick` clips to Supabase. Includes local and cloud storage cleanup and a heartbeat for dashboard online status. Degrades gracefully when the LCD is absent or the network is down. |
-| `pi_deploy/crdd.service` | systemd unit that starts the monitor at boot and restarts it on failure, so the system runs unattended. |
-| `pi_deploy/pi_requirements.txt` | Pi-only dependency list. Excludes PyTorch. |
+PyTorch is not installed on the Pi. Inference runs entirely through ONNX Runtime.
 
 ## Usage
 
@@ -189,6 +159,7 @@ Run the scripts in this order from the project root.
 **1. Organize the dataset**
 
 Place `.wav` files into `data/raw/Healthy/`, `data/raw/Sick/`, and `data/raw/None/`.
+Raw audio is not included in this repository.
 
 **2. Generate splits**
 
@@ -196,7 +167,7 @@ Place `.wav` files into `data/raw/Healthy/`, `data/raw/Sick/`, and `data/raw/Non
 python scripts/01_prepare_data.py
 ```
 
-Creates `data/splits/train.txt`, `val.txt`, and `test.txt`.
+Creates `data/splits/train.txt`, `val.txt`, and `test.txt` (70/15/15, stratified per class).
 
 **3. Train**
 
@@ -213,13 +184,13 @@ Saves `models/saved/crdd_model_v1.pth` (best validation accuracy) and
 python scripts/04_evaluation.py
 ```
 
-Writes tables and figures to `results/`.
-
 **5. Export to ONNX**
 
 ```bash
 python scripts/03_export_onnx.py
 ```
+
+Verifies that PyTorch and ONNX outputs match within 1e-4 before you deploy.
 
 **6. Evaluate the deployed pipeline**
 
@@ -227,69 +198,100 @@ python scripts/03_export_onnx.py
 python scripts/05_evaluate_pi_pipeline.py
 ```
 
-Writes the deployed-path metrics and `Pipeline_Comparison.csv` to
-`results/librosa_results/`.
+Writes deployed-path metrics and `Pipeline_Comparison.csv` to `results/librosa_results/`.
 
 **7. Deploy to the Raspberry Pi**
 
-Copy `models/saved/crdd_model_v1.onnx` and the `pi_deploy/` folder to the Pi, then install
-dependencies and run:
+Copy `models/saved/crdd_model_v1.onnx` into `pi_deploy/`, copy the `pi_deploy/` folder to
+the Pi (e.g. `/home/pi/pi_deploy`), then run
 
 ```bash
-pip install -r pi_requirements.txt
-python pi_deploy/pi_monitor.py
+python3 pi_deploy/pi_monitor.py
 ```
 
 **8. Run as a service (optional)**
 
-To keep the monitor running at boot and restart it automatically on failure:
+Starts the monitor at boot and restarts it if it crashes
 
 ```bash
-sudo cp pi_deploy/crdd.service /etc/systemd/system/
+sudo cp pi_deploy/poultry-monitor.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable crdd.service
-sudo systemctl start crdd.service
+sudo systemctl enable --now poultry-monitor.service
 ```
 
-Check status and logs:
+Check status and logs
 
 ```bash
-systemctl status crdd.service
-journalctl -u crdd.service -f
+systemctl status poultry-monitor.service
+journalctl -u poultry-monitor.service -f
 ```
 
-## Outputs
+Run either the systemd service or the Pi Docker container, not both, or they will fight
+over the microphone.
 
-**Training pipeline (`results/`)**
+## Directory Structure
 
-| File | Contents |
+```
+crdd-hau-soc-model/
+├── configs/
+│   └── config.py                       Central configuration
+├── src/
+│   ├── data/
+│   │   ├── audio_dataset.py            PyTorch Dataset: wav → spectrogram tensor
+│   │   └── split_dataset.py            Train/val/test split generation
+│   ├── models/
+│   │   └── builder.py                  MobileNetV4 model construction
+│   └── training/
+│       └── trainer.py                  Training and validation loops
+├── scripts/
+│   ├── 01_prepare_data.py              Build data splits
+│   ├── 02_train.py                     Train the model
+│   ├── 03_export_onnx.py               Export to ONNX
+│   ├── 04_evaluation.py                Evaluate the training pipeline
+│   └── 05_evaluate_pi_pipeline.py      Evaluate the deployed pipeline
+├── pi_deploy/
+│   ├── pi_monitor.py                   Live inference on the Raspberry Pi
+│   ├── verify_preprocessing.py         Training vs Pi preprocessing check
+│   ├── poultry-monitor.service         systemd unit for continuous operation
+│   └── pi_requirements.txt             Pi-only dependencies
+├── docker/
+│   ├── Dockerfile                      Training image (CUDA 12.1)
+│   ├── Dockerfile.pi                   Raspberry Pi image (arm64)
+│   ├── docker-compose.yml              Compose file for the training image
+│   └── DOCKER.md                       Docker instructions
+├── models/saved/
+│   ├── crdd_model_v1.pth               Best checkpoint
+│   └── crdd_model_v1.onnx              Exported ONNX model
+├── results/                            Metrics, tables, and figures
+│   ├── librosa_results/                Deployed-pipeline outputs
+│   └── pipeline_agreement/             Per-clip training vs deployed comparison
+├── data/                               Not committed (raw audio + splits)
+├── .dockerignore
+├── requirements.txt
+├── requirements.lock.txt
+└── README.md
+```
+
+## File Reference
+
+| File | Description |
 |---|---|
-| `Model_A_Raw_Per_Epoch_Table.csv` | Per-epoch validation accuracy, loss, macro P/R/F1, and MCC. The peak epoch is starred. |
-| `Model_A_Raw_Overall_Metrics.csv` | Final test-set accuracy, macro precision, recall, F1, and MCC. |
-| `Model_A_Raw_Prediction_Results.csv` | Total, correct, and incorrect prediction counts. |
-| `Model_A_Raw_Epoch_*.png` | Per-epoch curves: loss, accuracy, precision, recall, F1, MCC. |
-| `Model_A_Raw_Confusion_Matrix.png` | Confusion matrix heatmap. Rows are true labels, columns are predictions. |
-| `Model_A_Raw_Metrics_Chart.png` | Per-class precision, recall, and F1. |
-| `Model_A_Raw_Prediction_Pie.png` | Correct versus incorrect prediction share. |
-
-**Deployed pipeline (`results/librosa_results/`)**
-
-| File | Contents |
-|---|---|
-| `Model_A_Pi_Overall_Metrics.csv` | Deployed-path accuracy, macro P/R/F1, and MCC. |
-| `Model_A_Pi_Predictions.csv` | Per-clip true label, prediction, and confidence. |
-| `Model_A_Pi_Prediction_Results.csv` | Total, correct, and incorrect counts. |
-| `Model_A_Pi_Confusion_Matrix.png` | Confusion matrix for the deployed path. |
-| `Model_A_Pi_Metrics_Chart.png` | Per-class metrics for the deployed path. |
-| `Model_A_Pi_Prediction_Pie.png` | Correct versus incorrect prediction share. |
-| `Pipeline_Comparison.csv` | Training versus deployed metrics, side by side. |
-
-Each metric is saved as a separate figure. Per-epoch training curves apply only to the
-PyTorch pipeline, since the deployed path performs inference only.
+| `configs/config.py` | Single source of truth for paths, audio parameters, class names, and hyperparameters. |
+| `src/data/split_dataset.py` | Stratified 70/15/15 split per class with a fixed seed. |
+| `src/data/audio_dataset.py` | `ChickenAudioDataset`. Mono mixdown, resampling, pad/crop, augmentation, log-mel, SpecAugment, standardization, resize. |
+| `src/models/builder.py` | MobileNetV4 conv-small via `timm` with a 3-class head and dropout. |
+| `src/training/trainer.py` | `train_one_epoch()` and `validate()`, with gradient clipping. |
+| `scripts/02_train.py` | Class-weighted training with AdamW, cosine annealing, per-epoch metrics, early stopping. |
+| `scripts/03_export_onnx.py` | Exports to ONNX (opset 17) and verifies the output matches PyTorch. |
+| `scripts/04_evaluation.py` | Test-set metrics, confusion matrix, per-class chart, per-epoch curves. Outputs prefixed `Model_A_Raw_`. |
+| `scripts/05_evaluate_pi_pipeline.py` | Same test set through librosa + ONNX. Outputs prefixed `Model_A_Pi_`. Runs on the PC, not the Pi. |
+| `pi_deploy/pi_monitor.py` | Live loop on the Pi. Record, preprocess, infer, LCD, save, Supabase upload, heartbeat, storage cleanup. |
+| `pi_deploy/verify_preprocessing.py` | Runs one `.wav` through both pipelines and compares tensors and predictions. |
+| `pi_deploy/poultry-monitor.service` | systemd unit that keeps the monitor running unattended. |
 
 ## Configuration
 
-Audio and training parameters are defined in `configs/config.py`:
+Audio and training parameters live in `configs/config.py`
 
 | Parameter | Value |
 |---|---|
@@ -297,70 +299,57 @@ Audio and training parameters are defined in `configs/config.py`:
 | Clip duration | 5 seconds |
 | FFT size / hop length | 1024 / 512 |
 | Mel bands | 128 |
-| Input image size | 224 x 224 |
+| Input image size | 224 × 224 |
 | Batch size | 16 |
 | Learning rate | 3e-4 |
 | Weight decay | 1e-4 |
 | Label smoothing | 0.1 |
-| Max epochs | 40 |
-| Early stop patience | 8 |
+| Max epochs / early stop patience | 40 / 8 |
 | Random seed | 42 |
 
-Pi-side behavior is configured at the top of `pi_deploy/pi_monitor.py`: confidence
-threshold, LCD hold time, storage thresholds, timezone, and Supabase settings.
+Pi-side behavior (confidence threshold, LCD hold time, storage limits, timezone, Supabase
+settings) is set at the top of `pi_deploy/pi_monitor.py`.
 
-**Changing audio parameters requires three coordinated updates.** Any change to sample rate,
-duration, FFT size, hop length, mel bands, or image size must be mirrored in
-`configs/config.py` and `pi_deploy/pi_monitor.py`, and the ONNX model must be re-exported.
-A mismatch degrades real-world accuracy silently and will not appear in any training metric.
-
-## Model Details
-
-| Property | Value |
-|---|---|
-| Architecture | MobileNetV4 conv-small (`timm`) |
-| Pretrained weights | ImageNet (`e1200_r224_in1k`) |
-| Input | 3-channel 224x224 log-mel spectrogram |
-| Output | 3 class logits (Healthy, Sick, None) |
-| Loss | Cross-entropy with inverse-frequency class weights and label smoothing |
-| Optimizer | AdamW with cosine annealing |
-| Regularization | Dropout, gradient clipping, waveform augmentation, SpecAugment |
-| Export format | ONNX opset 17, fixed batch size of 1 |
-| Inference runtime | ONNX Runtime, CPU execution provider |
-
-MobileNetV4 conv-small was selected for its size and CPU inference speed on the Pi 4B.
-Augmentation is applied during training only, never during validation or testing.
+> **Changing audio parameters requires three coordinated updates.** Any change to sample
+> rate, duration, FFT size, hop length, mel bands, or image size must be made in both
+> `configs/config.py` and `pi_deploy/pi_monitor.py`, and the ONNX model must be
+> re-exported. A mismatch silently lowers real-world accuracy and will not show up in any
+> training metric.
 
 ## Troubleshooting
 
 **`ERROR: no working sample rate found for the microphone`**
-The USB mic does not support any of the candidate rates. Run `python3 -m sounddevice` to
-list devices, then set `MIC_DEVICE` to the correct index at the top of `pi_monitor.py`.
+Run `python3 -m sounddevice` to list devices, then set `MIC_DEVICE` to the right index at
+the top of `pi_monitor.py`.
 
 **PortAudio error -9997 (invalid sample rate)**
-The mic cannot capture at 16 kHz directly. The monitor already falls back to the device's
-native rate and resamples in software; confirm `libportaudio2` is installed.
+The mic cannot capture at 16 kHz directly. The monitor already falls back to the mic's
+native rate and resamples in software. Confirm `libportaudio2` is installed.
 
-**LCD does not light up or shows nothing**
-Confirm the I2C address with `i2cdetect -y 1` and update `LCD_ADDRESS` (commonly `0x27` or
-`0x3F`). The monitor continues running without the LCD and still prints results to the
-terminal.
+**LCD shows nothing**
+Find the I2C address with `i2cdetect -y 1` and update `LCD_ADDRESS` (usually `0x27` or
+`0x3F`). The monitor keeps running without the LCD.
 
 **`ERROR: model not found`**
-Copy `crdd_model_v1.onnx` from `models/saved/` into the `pi_deploy/` folder on the Pi.
+Copy `crdd_model_v1.onnx` from `models/saved/` into `pi_deploy/`.
 
 **PyTorch and ONNX outputs differ by more than 1e-4**
-Do not deploy. Check that the torch and onnx package versions match those in
-`requirements.txt`, then re-run `03_export_onnx.py`.
+Do not deploy. Match the package versions in `requirements.lock.txt` and re-run
+`03_export_onnx.py`.
 
 **Uploads fail with a Supabase error**
-The clip is kept locally and the loop continues. Verify network connectivity, the bucket
-name, and the Row Level Security policies on the project.
+The clip stays local and the loop continues. Check the network, the bucket name, and the
+Row Level Security policies.
 
-**Training and deployed metrics differ noticeably**
-Inspect `Model_A_Pi_Predictions.csv` for the disagreeing clips. Divergence usually traces
-to the resampling stage rather than the mel or resize stages.
+**Dashboard shows the device as offline**
+The Pi updates its heartbeat every cycle. Check that the Pi has internet and that the
+monitor is running (`systemctl status poultry-monitor.service` or `docker logs -f crdd`).
+
+For Docker-specific errors, see the [Docker troubleshooting section](docker/DOCKER.md#troubleshooting).
 
 ## Acknowledgments
 
-Training data includes the SmartEars dataset alongside locally captured field recordings.
+Training data includes the [SmartEars dataset](https://data.mendeley.com/) (Mendeley Data)
+alongside locally captured field recordings.
+
+Developed as an undergraduate thesis at Holy Angel University, School of Computing.
